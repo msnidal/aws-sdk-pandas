@@ -520,6 +520,11 @@ def pyarrow_types_from_pandas(  # pylint: disable=too-many-branches,too-many-sta
         _logger.debug("Inferring PyArrow type from column: %s", col)
         try:
             schema: pa.Schema = pa.Schema.from_pandas(df=df[[col]], preserve_index=False)
+            inferred_type = schema.field(col).type
+            if pa.types.is_struct(inferred_type):
+                cols_dtypes[col] = pa.map_(pa.string(), pa.string())
+            else:
+                cols_dtypes[col] = inferred_type
         except pa.ArrowInvalid as ex:
             cols_dtypes[col] = process_not_inferred_dtype(ex)
         except TypeError as ex:
