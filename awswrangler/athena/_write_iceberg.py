@@ -39,7 +39,9 @@ def _create_iceberg_table(
     columns_comments: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not path:
-        raise exceptions.InvalidArgumentValue("Must specify table location to create the table.")
+        raise exceptions.InvalidArgumentValue(
+            "Must specify table location to create the table."
+        )
 
     columns_types, _ = catalog.extract_athena_types(df=df, index=index, dtype=dtype)
     cols_str: str = ", ".join(
@@ -50,9 +52,16 @@ def _create_iceberg_table(
             for k, v in columns_types.items()
         ]
     )
-    partition_cols_str: str = f"PARTITIONED BY ({', '.join([col for col in partition_cols])})" if partition_cols else ""
+    partition_cols_str: str = (
+        f"PARTITIONED BY ({', '.join([col for col in partition_cols])})"
+        if partition_cols
+        else ""
+    )
     table_properties_str: str = (
-        ", " + ", ".join([f"'{key}'='{value}'" for key, value in additional_table_properties.items()])
+        ", "
+        + ", ".join(
+            [f"'{key}'='{value}'" for key, value in additional_table_properties.items()]
+        )
         if additional_table_properties
         else ""
     )
@@ -93,14 +102,22 @@ def _determine_differences(
     dtype: Optional[Dict[str, str]],
     catalog_id: Optional[str],
 ) -> _SchemaChanges:
-    frame_columns_types, frame_partitions_types = _data_types.athena_types_from_pandas_partitioned(
+    (
+        frame_columns_types,
+        frame_partitions_types,
+    ) = _data_types.athena_types_from_pandas_partitioned(
         df=df, index=index, partition_cols=partition_cols, dtype=dtype
     )
     frame_columns_types.update(frame_partitions_types)
 
     catalog_column_types = typing.cast(
         Dict[str, str],
-        catalog.get_table_types(database=database, table=table, catalog_id=catalog_id, boto3_session=boto3_session),
+        catalog.get_table_types(
+            database=database,
+            table=table,
+            catalog_id=catalog_id,
+            boto3_session=boto3_session,
+        ),
     )
 
     original_columns = set(catalog_column_types)
@@ -145,7 +162,9 @@ def _alter_iceberg_table(
         )
 
     if schema_changes["to_remove"]:
-        raise exceptions.InvalidArgumentCombination("Removing columns of Iceberg tables is not currently supported.")
+        raise exceptions.InvalidArgumentCombination(
+            "Removing columns of Iceberg tables is not currently supported."
+        )
 
     for statement in sql_statements:
         query_execution_id: str = _start_query_execution(
@@ -165,7 +184,9 @@ def _alter_iceberg_table_add_columns_sql(
     table: str,
     columns_to_add: Dict[str, str],
 ) -> List[str]:
-    add_cols_str = ", ".join([f"{col_name} {columns_to_add[col_name]}" for col_name in columns_to_add])
+    add_cols_str = ", ".join(
+        [f"{col_name} {columns_to_add[col_name]}" for col_name in columns_to_add]
+    )
 
     return [f"ALTER TABLE {table} ADD COLUMNS ({add_cols_str})"]
 
@@ -177,7 +198,9 @@ def _alter_iceberg_table_change_columns_sql(
     sql_statements = []
 
     for col_name, col_type in columns_to_change.items():
-        sql_statements.append(f"ALTER TABLE {table} CHANGE COLUMN {col_name} {col_name} {col_type}")
+        sql_statements.append(
+            f"ALTER TABLE {table} CHANGE COLUMN {col_name} {col_name} {col_type}"
+        )
 
     return sql_statements
 
@@ -305,7 +328,9 @@ def to_iceberg(
     if df.empty is True:
         raise exceptions.EmptyDataFrame("DataFrame cannot be empty.")
 
-    wg_config: _WorkGroupConfig = _get_workgroup_config(session=boto3_session, workgroup=workgroup)
+    wg_config: _WorkGroupConfig = _get_workgroup_config(
+        session=boto3_session, workgroup=workgroup
+    )
     temp_table: str = f"temp_table_{uuid.uuid4().hex}"
 
     if not temp_path and not wg_config.s3_output:
@@ -321,7 +346,10 @@ def to_iceberg(
     try:
         # Create Iceberg table if it doesn't exist
         if not catalog.does_table_exist(
-            database=database, table=table, boto3_session=boto3_session, catalog_id=catalog_id
+            database=database,
+            table=table,
+            boto3_session=boto3_session,
+            catalog_id=catalog_id,
         ):
             _create_iceberg_table(
                 df=df,
@@ -352,7 +380,9 @@ def to_iceberg(
                 catalog_id=catalog_id,
             )
             if schema_evolution is False and any([schema_differences[x] for x in schema_differences]):  # type: ignore[literal-required]
-                raise exceptions.InvalidArgumentValue(f"Schema change detected: {schema_differences}")
+                raise exceptions.InvalidArgumentValue(
+                    f"Schema change detected: {schema_differences}"
+                )
 
             _alter_iceberg_table(
                 database=database,
@@ -380,6 +410,30 @@ def to_iceberg(
             glue_table_settings=glue_table_settings,
         )
 
+        # Handle iceberg timestamp(6) casting
+        timestamp_columns = [
+            col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])
+        ]
+        select_columns = [
+            f'CAST("{col}" AS timestamp(6))' if col in timestamp_columns else f'"{col}"'
+            for col in df.columns
+        ]
+
+        select_statement = ", ".join(select_columns)
+        update_set = ", ".join(
+            [
+                f'"{col}" = source.{f"CAST({col} AS timestamp(6))" if col in timestamp_columns else f"{col}"}'
+                for col in df.columns
+            ]
+        )
+        insert_columns = ", ".join([f'"{col}"' for col in df.columns])
+        insert_values = ", ".join(
+            [
+                f'source.{f"CAST({col} AS timestamp(6))" if col in timestamp_columns else f"{col}"}'
+                for col in df.columns
+            ]
+        )
+
         # Insert or merge into Iceberg table
         sql_statement: str
         if merge_cols:
@@ -388,13 +442,13 @@ def to_iceberg(
                 USING "{database}"."{temp_table}" source
                 ON {' AND '.join([f'target."{x}" = source."{x}"' for x in merge_cols])}
                 WHEN MATCHED THEN
-                    UPDATE SET {', '.join([f'"{x}" = source."{x}"' for x in df.columns])}
+                    UPDATE SET {update_set}
                 WHEN NOT MATCHED THEN
-                    INSERT ({', '.join([f'"{x}"' for x in df.columns])})
-                    VALUES ({', '.join([f'source."{x}"' for x in df.columns])})
+                    INSERT ({insert_columns})
+                    VALUES ({insert_values})
             """
         else:
-            sql_statement = f'INSERT INTO "{database}"."{table}" SELECT * FROM "{database}"."{temp_table}"'
+            sql_statement = f'INSERT INTO "{database}"."{table}" SELECT {select_statement} FROM "{database}"."{temp_table}"'
 
         query_execution_id: str = _start_query_execution(
             sql=sql_statement,
@@ -414,7 +468,10 @@ def to_iceberg(
         raise
     finally:
         catalog.delete_table_if_exists(
-            database=database, table=temp_table, boto3_session=boto3_session, catalog_id=catalog_id
+            database=database,
+            table=temp_table,
+            boto3_session=boto3_session,
+            catalog_id=catalog_id,
         )
 
         if keep_files is False:
